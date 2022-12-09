@@ -1,0 +1,136 @@
+version: '3.8'
+
+volumes:
+  temp_init:
+  backup_tmp:
+  mongo-data-0:
+  mongo-data-1:
+  mongo-data-2:
+
+networks:
+  db-network:
+    name: '${COMPOSE_PROJECT_NAME}_network'
+    attachable: true
+    # driver_opts:
+    #   encrypted: $INTERNAL_NETWORK_ENCRYPTED
+
+x-common-service: &common-service
+  image: mongo:${MONGO_VERSION}
+  networks:
+    db-network:
+  command: 'mongod --auth --keyFile /opt/keyfile/mongodb-keyfile --replSet ${COMPOSE_PROJECT_NAME}_replica-set'
+
+x-common-update-and-restart-policy: &common-update-and-restart-policy
+  update_config:
+    parallelism: 1
+    delay: 5s
+    failure_action: rollback
+    order: stop-first
+  restart_policy:
+    condition: on-failure
+
+x-common-primary-ressource-allocation: &common-primary-ressource-allocation
+  resources:
+    limits:
+      cpus: $MONGO_PRIMARY_ALLOCATED_CPU
+      memory: $MONGO_PRIMARY_ALLOCATED_MEMORY
+    reservations:
+      cpus: $MONGO_PRIMARY_ALLOCATED_CPU
+      memory: $MONGO_PRIMARY_ALLOCATED_MEMORY
+
+x-common-secondary-ressource-allocation: &common-secondary-ressource-allocation
+  resources:
+    limits:
+      cpus: $MONGO_SECONDARY_ALLOCATED_CPU
+      memory: $MONGO_SECONDARY_ALLOCATED_MEMORY
+    reservations:
+      cpus: $MONGO_SECONDARY_ALLOCATED_CPU
+      memory: $MONGO_SECONDARY_ALLOCATED_MEMORY
+
+services:
+  mongo-init:
+    image: jonisapp/mongo_replicaset-init:mongo-4.4
+    networks:
+      db-network:
+    volumes:
+      - temp_init:/tmp/mongo_restore
+    environment:
+      - COMPOSE_PROJECT_NAME
+      - MONGODB_USER=$MONGO_INITDB_ROOT_USERNAME
+      - MONGODB_PASS=$MONGO_INITDB_ROOT_PASSWORD
+      - MONGO_IMPORT_DB_URL
+    deploy:
+      restart_policy:
+        condition: none
+
+  mongo-backup:
+    image: jonisapp/mongo-backup_s3-compatible-storage:mongo-4.4
+    networks:
+      db-network:
+    volumes:
+      - backup_tmp:/root/tmp/
+    environment:
+      - COMPOSE_PROJECT_NAME
+      - MONGODB_HOST=${COMPOSE_PROJECT_NAME}_mongo-primary
+      - MONGODB_USER=$MONGO_INITDB_ROOT_USERNAME
+      - MONGODB_PASS=$MONGO_INITDB_ROOT_PASSWORD
+      - BACKUP_AUTO_RESTORE=${BACKUP_AUTO_RESTORE:-false}
+      - CRON_TIME=$BACKUP_CRON_TIME
+      - AWS_ACCESS_KEY_ID=$BACKUP_S3_ACCESS_KEY_ID
+      - AWS_SECRET_ACCESS_KEY=$BACKUP_S3_SECRET_ACCESS_KEY
+      - ENDPOINT_URL=$BACKUP_ENDPOINT_URL
+      - BUCKET=$BACKUP_S3_BUCKET
+    deploy:
+      restart_policy:
+        condition: on-failure
+    entrypoint: ['bash', '/root/backup-init.sh']
+
+  mongo-primary:
+    <<: *common-service
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME
+      - MONGO_INITDB_ROOT_PASSWORD
+    volumes:
+      - /mongo-keys:/opt/keyfile
+      - mongo-data-0:/data/db
+    ports:
+      - 27017:27017
+    deploy:
+      <<:
+        [
+          *common-update-and-restart-policy,
+          *common-primary-ressource-allocation,
+        ]
+      # placement:
+      #   constraints:
+      #     - node.labels.hostname == node-1
+
+  mongo-secondary-1:
+    <<: *common-service
+    volumes:
+      - /mongo-keys:/opt/keyfile
+      - mongo-data-1:/data/db
+    deploy:
+      <<:
+        [
+          *common-update-and-restart-policy,
+          *common-secondary-ressource-allocation,
+        ]
+      # placement:
+      #   constraints:
+      #     - node.labels.hostname == node-2
+
+  mongo-secondary-2:
+    <<: *common-service
+    volumes:
+      - /mongo-keys:/opt/keyfile
+      - mongo-data-2:/data/db
+    deploy:
+      <<:
+        [
+          *common-update-and-restart-policy,
+          *common-secondary-ressource-allocation,
+        ]
+      # placement:
+      #   constraints:
+      #     - node.labels.hostname == node-2
